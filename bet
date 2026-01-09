@@ -1,0 +1,1315 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support. ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium. common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.common.action_chains import ActionChains
+import time
+import pickle
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+import threading
+from datetime import datetime
+import re
+import base64
+from io import BytesIO
+
+# ================== 配置 ==================
+URL = "https://mos055.com/"
+USERNAME = "LJJ123123"
+PASSWORD = "zz66688899"
+COOKIES_FILE = "mos055_cookies.pkl"
+
+# ================== BettingBot 类 ==================
+class BettingBot: 
+    def __init__(self):
+        self.driver = None
+        self.is_running = False
+        self. is_logged_in = False
+        self. wait = None
+        self.auto_bet_enabled = False
+        self.bet_amount = 2
+        self.bet_history = []
+        self.threshold_settings = {}
+        self.current_matches = []
+        self.font_map = {}  # 字体映射表
+        
+    def setup_driver(self, headless=False):
+        options = webdriver.ChromeOptions()
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        
+        if headless:
+            options.add_argument("--headless=new")
+        
+        self.driver = webdriver.Chrome(options=options)
+        self.wait = WebDriverWait(self. driver, 60)
+        
+        self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': '''
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                window.chrome = {runtime: {}};
+            '''
+        })
+    
+    def handle_password_popup(self, log_callback):
+        log_callback("检测并处理简易密码弹窗...")
+        
+        for attempt in range(15):
+            try:
+                popup_visible = self.driver.execute_script("""
+                    var popup = document.getElementById('c_alert_modify');
+                    if (popup) {
+                        var style = window.getComputedStyle(popup);
+                        return popup.offsetWidth > 0 && popup.offsetHeight > 0 && 
+                               style.display !== 'none' && style.visibility !== 'hidden';
+                    }
+                    return false;
+                """)
+                
+                if not popup_visible:
+                    has_popup_text = self.driver.execute_script("""
+                        return document.body.innerText.includes('简易密码') || 
+                               document.body.innerText.includes('快速登入');
+                    """)
+                    if not has_popup_text:
+                        log_callback("✓ 弹窗已关闭或不存在")
+                        return True
+                
+                result = self.driver.execute_script("""
+                    var elements = document.querySelectorAll('div, button, span');
+                    for (var elem of elements) {
+                        if (elem.innerText.trim() === '否' && 
+                            elem.offsetWidth > 0 && elem.offsetHeight > 0) {
+                            elem.click();
+                            return {success: true};
+                        }
+                    }
+                    return {success: false};
+                """)
+                if result.get('success'):
+                    log_callback(f"  第{attempt+1}次点击成功")
+                    time.sleep(2)
+                    continue
+                
+                time.sleep(1)
+            except: 
+                time.sleep(1)
+        
+        return False
+        
+    def login(self, username, password, log_callback):
+        try:
+            log_callback("正在访问登录页面...")
+            self.driver.get(URL)
+            time.sleep(8)
+            
+            username_field = self.wait.until(EC.element_to_be_clickable((By. ID, "usr")))
+            log_callback("✓ 找到用户名输入框")
+            self.driver.execute_script("arguments[0].value = arguments[1];", username_field, username)
+            log_callback(f"✓ 已输入用户名: {username}")
+            
+            password_field = self.wait.until(EC. element_to_be_clickable((By.ID, "pwd")))
+            self.driver.execute_script("arguments[0].value = arguments[1];", password_field, password)
+            log_callback("✓ 已输入密码")
+            
+            login_button = self.wait.until(EC.element_to_be_clickable((By. ID, "btn_login")))
+            self.driver.execute_script("arguments[0].click();", login_button)
+            log_callback("✓ 已点击登录按钮")
+            
+            log_callback("\n等待登录响应...")
+            time.sleep(10)
+            
+            self.handle_password_popup(log_callback)
+            time.sleep(3)
+            
+            log_callback("\n等待主页面加载...")
+            for i in range(12):
+                time.sleep(5)
+                elapsed = (i + 1) * 5
+                log_callback(f"  已等待 {elapsed} 秒...")
+                
+                if elapsed % 10 == 0:
+                    try:
+                        found = self.driver.execute_script("""
+                            var elements = document.querySelectorAll('*');
+                            for (var elem of elements) {
+                                var text = (elem.textContent || '').trim();
+                                if (text === '滚球' && elem.offsetWidth > 0 && elem.offsetHeight > 0) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        """)
+                        if found:
+                            log_callback(f"✓ 页面已加载完成")
+                            break
+                    except:
+                        pass
+            
+            log_callback(f"\n当前URL: {self.driver.current_url}")
+            
+            cookies = self.driver.get_cookies()
+            with open(COOKIES_FILE, "wb") as f:
+                pickle.dump(cookies, f)
+            log_callback(f"✓ Cookies 已保存")
+            
+            log_callback("\n进入滚球页面...")
+            time.sleep(3)
+            
+            click_result = self.driver.execute_script("""
+                var elements = document.querySelectorAll('*');
+                for (var elem of elements) {
+                    var text = (elem.textContent || '').trim();
+                    var visible = elem.offsetWidth > 0 && elem.offsetHeight > 0;
+                    if (visible && text === '滚球') {
+                        elem.scrollIntoView({behavior: 'smooth', block:  'center'});
+                        elem.click();
+                        return {success: true};
+                    }
+                }
+                return {success: false};
+            """)
+            
+            if click_result.get('success'):
+                log_callback(f"✓ 已点击滚球")
+            
+            log_callback("等待滚球页面加载...")
+            time.sleep(10)
+            
+            self.is_logged_in = True
+            log_callback("\n✓ 登录流程完成！")
+            
+            return True
+            
+        except Exception as e:
+            log_callback(f"\n✗ 登录失败:  {str(e)}")
+            return False
+
+    def diagnose_page(self, log_callback):
+        """诊断页面，检测反爬虫技术"""
+        log_callback("\n🔍 开始诊断页面...")
+        
+        diagnosis = self.driver.execute_script("""
+            function diagnosePage() {
+                var result = {
+                    customFonts: [],
+                    canvasElements: [],
+                    svgElements: [],
+                    cssContentElements: [],
+                    backgroundImages: [],
+                    iframes: [],
+                    shadowDOMs: [],
+                    webglElements: [],
+                    suspiciousElements: []
+                };
+                
+                // 1. 检测自定义字体
+                var allElements = document.querySelectorAll('*');
+                var fontFamilies = new Set();
+                
+                allElements.forEach(function(elem) {
+                    if (elem.offsetWidth > 0 && elem. offsetHeight > 0) {
+                        var style = window.getComputedStyle(elem);
+                        var fontFamily = style.fontFamily;
+                        
+                        // 检测可疑字体
+                        if (fontFamily && ! fontFamily.includes('Arial') && 
+                            !fontFamily.includes('Helvetica') && 
+                            !fontFamily.includes('sans-serif') &&
+                            ! fontFamily.includes('Microsoft YaHei')) {
+                            fontFamilies.add(fontFamily);
+                        }
+                        
+                        // 检测CSS content
+                        var beforeContent = window.getComputedStyle(elem, '::before').content;
+                        var afterContent = window.getComputedStyle(elem, '::after').content;
+                        
+                        if (beforeContent && beforeContent !== 'none' && beforeContent !== 'normal') {
+                            result.cssContentElements.push({
+                                tag: elem.tagName,
+                                class: elem.className,
+                                content: beforeContent,
+                                type: 'before'
+                            });
+                        }
+                        
+                        if (afterContent && afterContent !== 'none' && afterContent !== 'normal') {
+                            result.cssContentElements.push({
+                                tag: elem.tagName,
+                                class: elem.className,
+                                content: afterContent,
+                                type: 'after'
+                            });
+                        }
+                        
+                        // 检测背景图片
+                        var bgImage = style.backgroundImage;
+                        if (bgImage && bgImage !== 'none') {
+                            result.backgroundImages.push({
+                                tag: elem.tagName,
+                                class: elem.className,
+                                bgImage: bgImage. substring(0, 100)
+                            });
+                        }
+                    }
+                });
+                
+                result.customFonts = Array. from(fontFamilies);
+                
+                // 2. 检测Canvas元素
+                var canvases = document.querySelectorAll('canvas');
+                canvases.forEach(function(canvas) {
+                    var rect = canvas.getBoundingClientRect();
+                    result.canvasElements.push({
+                        width: canvas.width,
+                        height: canvas.height,
+                        x: rect.x,
+                        y: rect. y
+                    });
+                });
+                
+                // 3. 检测SVG元素
+                var svgs = document.querySelectorAll('svg');
+                svgs.forEach(function(svg) {
+                    var rect = svg. getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        result.svgElements.push({
+                            width: rect.width,
+                            height: rect.height,
+                            x: rect.x,
+                            y: rect.y,
+                            innerHTML: svg.innerHTML. substring(0, 200)
+                        });
+                    }
+                });
+                
+                // 4. 检测iframe
+                var iframes = document. querySelectorAll('iframe');
+                iframes.forEach(function(iframe) {
+                    result.iframes.push({
+                        src: iframe.src,
+                        width: iframe.width,
+                        height: iframe.height
+                    });
+                });
+                
+                // 5. 检测Shadow DOM
+                allElements.forEach(function(elem) {
+                    if (elem. shadowRoot) {
+                        result.shadowDOMs.push({
+                            tag: elem.tagName,
+                            class: elem.className,
+                            childCount: elem.shadowRoot.childElementCount
+                        });
+                    }
+                });
+                
+                // 6. 检测可疑的数字元素
+                allElements.forEach(function(elem) {
+                    var rect = elem.getBoundingClientRect();
+                    if (rect. width > 20 && rect.width < 100 && 
+                        rect. height > 10 && rect.height < 50 &&
+                        rect.y > 200 && rect.y < 1500) {
+                        
+                        var text = elem.innerText || elem.textContent || '';
+                        var style = window.getComputedStyle(elem);
+                        
+                        // 检查是否有异常
+                        if (text.trim() === '' && elem.children.length === 0) {
+                            // 空元素但有尺寸，可能用其他方式显示内容
+                            result.suspiciousElements.push({
+                                tag: elem.tagName,
+                                class: elem.className,
+                                id: elem.id,
+                                x: Math.round(rect.x),
+                                y: Math.round(rect. y),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
+                                fontFamily: style.fontFamily,
+                                bgImage: style.backgroundImage !== 'none',
+                                reason: 'empty_with_size'
+                            });
+                        }
+                    }
+                });
+                
+                return result;
+            }
+            return diagnosePage();
+        """)
+        
+        log_callback(f"\n📊 诊断结果:")
+        log_callback(f"  自定义字体: {len(diagnosis.get('customFonts', []))} 个")
+        for font in diagnosis.get('customFonts', [])[:5]:
+            log_callback(f"    - {font}")
+        
+        log_callback(f"  Canvas元素: {len(diagnosis.get('canvasElements', []))} 个")
+        log_callback(f"  SVG元素: {len(diagnosis. get('svgElements', []))} 个")
+        log_callback(f"  CSS Content: {len(diagnosis.get('cssContentElements', []))} 个")
+        log_callback(f"  背景图片: {len(diagnosis.get('backgroundImages', []))} 个")
+        log_callback(f"  iframe: {len(diagnosis.get('iframes', []))} 个")
+        log_callback(f"  Shadow DOM: {len(diagnosis. get('shadowDOMs', []))} 个")
+        log_callback(f"  可疑元素: {len(diagnosis.get('suspiciousElements', []))} 个")
+        
+        return diagnosis
+
+    def get_all_odds_data(self):
+        """获取页面上所有水位数据 - 支持多种反爬虫技术"""
+        try:
+            # 先滚动页面触发懒加载
+            self.driver.execute_script("""
+                window.scrollTo(0, 500);
+                setTimeout(function() { window.scrollTo(0, 0); }, 300);
+            """)
+            time.sleep(1)
+            
+            data = self.driver.execute_script("""
+                function getAllOddsData() {
+                    var matches = [];
+                    var currentLeague = '';
+                    var matchId = 0;
+                    var allTextData = [];
+                    var debugInfo = {
+                        method: 'unknown',
+                        fontMapped: 0,
+                        canvasOCR: 0,
+                        cssContent: 0,
+                        directText: 0
+                    };
+                    
+                    // ============ 方法1: 检测并解析自定义字体 ============
+                    function tryDecodeFontText(element) {
+                        var style = window.getComputedStyle(element);
+                        var fontFamily = style.fontFamily;
+                        var text = element.textContent || '';
+                        
+                        // 检查是否使用自定义字体
+                        if (fontFamily && (fontFamily.includes('iconfont') || 
+                            fontFamily.includes('odds') || 
+                            fontFamily.includes('num') ||
+                            fontFamily.includes('digit'))) {
+                            
+                            // 尝试获取Unicode码点
+                            var decoded = '';
+                            for (var i = 0; i < text.length; i++) {
+                                var code = text.charCodeAt(i);
+                                // 自定义字体通常映射到私有区域 E000-F8FF
+                                if (code >= 0xE000 && code <= 0xF8FF) {
+                                    // 需要字体映射表，这里尝试常见映射
+                                    var mapped = code - 0xE000;
+                                    if (mapped >= 0 && mapped <= 9) {
+                                        decoded += mapped. toString();
+                                    } else {
+                                        decoded += text[i];
+                                    }
+                                } else {
+                                    decoded += text[i];
+                                }
+                            }
+                            
+                            if (decoded !== text) {
+                                debugInfo.fontMapped++;
+                                return decoded;
+                            }
+                        }
+                        
+                        return null;
+                    }
+                    
+                    // ============ 方法2: 从CSS content获取 ============
+                    function getCSSContent(element) {
+                        try {
+                            var before = window.getComputedStyle(element, '::before').content;
+                            var after = window.getComputedStyle(element, '::after').content;
+                            
+                            var result = '';
+                            
+                            if (before && before !== 'none' && before !== 'normal') {
+                                result += before. replace(/['"]/g, '');
+                            }
+                            
+                            if (after && after !== 'none' && after !== 'normal') {
+                                result += after.replace(/['"]/g, '');
+                            }
+                            
+                            if (result) {
+                                debugInfo.cssContent++;
+                            }
+                            
+                            return result;
+                        } catch(e) {
+                            return '';
+                        }
+                    }
+                    
+                    // ============ 方法3: 从data属性获取 ============
+                    function getDataAttributes(element) {
+                        var attrs = ['data-value', 'data-odds', 'data-num', 'data-price', 
+                                    'data-text', 'data-content', 'value', 'data-v'];
+                        
+                        for (var i = 0; i < attrs.length; i++) {
+                            var val = element.getAttribute(attrs[i]);
+                            if (val && /\\d/. test(val)) {
+                                return val;
+                            }
+                        }
+                        
+                        // 检查所有data-*属性
+                        for (var j = 0; j < element.attributes.length; j++) {
+                            var attr = element. attributes[j];
+                            if (attr.name.startsWith('data-') && /^[\\d\\.]+$/.test(attr.value)) {
+                                return attr. value;
+                            }
+                        }
+                        
+                        return null;
+                    }
+                    
+                    // ============ 方法4: 从aria属性获取 ============
+                    function getAriaLabel(element) {
+                        var ariaLabel = element.getAttribute('aria-label');
+                        var ariaValue = element.getAttribute('aria-valuenow');
+                        var title = element.getAttribute('title');
+                        
+                        return ariaLabel || ariaValue || title || null;
+                    }
+                    
+                    // ============ 方法5: 从子元素拼接 ============
+                    function getTextFromChildren(element) {
+                        var text = '';
+                        var children = element.querySelectorAll('*');
+                        
+                        children.forEach(function(child) {
+                            if (child.children.length === 0) {
+                                var childText = child.textContent || '';
+                                var cssContent = getCSSContent(child);
+                                var dataAttr = getDataAttributes(child);
+                                
+                                text += cssContent || dataAttr || childText;
+                            }
+                        });
+                        
+                        return text. trim();
+                    }
+                    
+                    // ============ 方法6: 通过位置关系获取 ============
+                    function getTextByPosition(element) {
+                        var rect = element.getBoundingClientRect();
+                        
+                        // 查找重叠的文本元素
+                        var elementsAtPoint = document.elementsFromPoint(
+                            rect.x + rect. width / 2,
+                            rect.y + rect.height / 2
+                        );
+                        
+                        for (var i = 0; i < elementsAtPoint.length; i++) {
+                            var el = elementsAtPoint[i];
+                            if (el !== element) {
+                                var text = el.textContent || '';
+                                if (/^\\d\\.\\d{2}$/.test(text. trim())) {
+                                    return text.trim();
+                                }
+                            }
+                        }
+                        
+                        return null;
+                    }
+                    
+                    // ============ 方法7: 从样式计算值获取 ============
+                    function getFromComputedStyle(element) {
+                        try {
+                            var style = window.getComputedStyle(element);
+                            
+                            // 检查content属性
+                            var content = style.content;
+                            if (content && content !== 'none' && content !== 'normal') {
+                                return content. replace(/['"]/g, '');
+                            }
+                            
+                            // 检查-webkit-text-fill-color等
+                            // 有些网站通过clip-path隐藏真实文本
+                            
+                        } catch(e) {}
+                        
+                        return null;
+                    }
+                    
+                    // ============ 综合获取文本的函数 ============
+                    function getElementText(element) {
+                        var text = '';
+                        
+                        // 尝试所有方法
+                        var methods = [
+                            function() { return getDataAttributes(element); },
+                            function() { return getAriaLabel(element); },
+                            function() { return getCSSContent(element); },
+                            function() { return tryDecodeFontText(element); },
+                            function() { return getFromComputedStyle(element); },
+                            function() { return getTextByPosition(element); },
+                            function() { return getTextFromChildren(element); },
+                            function() { 
+                                var t = element.innerText || element.textContent || '';
+                                return t.split('\\n')[0].trim();
+                            }
+                        ];
+                        
+                        for (var i = 0; i < methods.length; i++) {
+                            try {
+                                var result = methods[i]();
+                                if (result && result. trim()) {
+                                    text = result.trim();
+                                    if (/\\d/.test(text)) {
+                                        // 包含数字，可能是我们要的
+                                        if (i === methods.length - 1) {
+                                            debugInfo.directText++;
+                                        }
+                                        break;
+                                    }
+                                }
+                            } catch(e) {}
+                        }
+                        
+                        return text;
+                    }
+                    
+                    // ============ 遍历页面元素 ============
+                    function traverseDOM(container) {
+                        if (!container) container = document. body;
+                        
+                        var elements = container.querySelectorAll('*');
+                        
+                        elements.forEach(function(element) {
+                            try {
+                                var rect = element.getBoundingClientRect();
+                                
+                                // 跳过不可见元素
+                                if (rect.width <= 0 || rect.height <= 0) return;
+                                if (rect.y < 50 || rect.y > 2500) return;
+                                
+                                var text = getElementText(element);
+                                
+                                if (text && text.length > 0 && text. length < 50) {
+                                    allTextData.push({
+                                        text: text,
+                                        x: Math.round(rect.x),
+                                        y: Math.round(rect.y),
+                                        width: Math.round(rect.width),
+                                        height: Math.round(rect.height),
+                                        tagName: element.tagName,
+                                        className: element.className || '',
+                                        id: element.id || ''
+                                    });
+                                }
+                                
+                                // 检查Shadow DOM
+                                if (element. shadowRoot) {
+                                    traverseDOM(element.shadowRoot);
+                                }
+                            } catch(e) {}
+                        });
+                    }
+                    
+                    // ============ 特殊处理:  尝试获取目标容器 ============
+                    function trySpecificPaths() {
+                        var paths = [
+                            '/html/body/div/div[3]/div[3]/div[2]/div[3]/div/div[2]',
+                            '//div[contains(@class, "odds")]',
+                            '//div[contains(@class, "match")]',
+                            '//div[contains(@class, "event")]',
+                            '//table[contains(@class, "odds")]//td'
+                        ];
+                        
+                        paths.forEach(function(xpath) {
+                            try {
+                                var result = document.evaluate(
+                                    xpath, document, null,
+                                    XPathResult. ORDERED_NODE_SNAPSHOT_TYPE, null
+                                );
+                                
+                                for (var i = 0; i < result.snapshotLength; i++) {
+                                    var elem = result.snapshotItem(i);
+                                    if (elem) {
+                                        traverseDOM(elem);
+                                    }
+                                }
+                            } catch(e) {}
+                        });
+                    }
+                    
+                    // ============ 特殊处理: 检查iframe ============
+                    function checkIframes() {
+                        var iframes = document.querySelectorAll('iframe');
+                        iframes. forEach(function(iframe) {
+                            try {
+                                var iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                                if (iframeDoc) {
+                                    traverseDOM(iframeDoc. body);
+                                }
+                            } catch(e) {
+                                // 跨域iframe无法访问
+                            }
+                        });
+                    }
+                    
+                    // 执行遍历
+                    traverseDOM(document. body);
+                    trySpecificPaths();
+                    checkIframes();
+                    
+                    // 去重
+                    var seen = new Set();
+                    var uniqueData = [];
+                    allTextData.forEach(function(item) {
+                        var key = item.text + '_' + item.x + '_' + item.y;
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            uniqueData.push(item);
+                        }
+                    });
+                    allTextData = uniqueData;
+                    
+                    // ============ 解析比赛数据 ============
+                    var oddsPattern = /^\\d\\.\\d{2}$/;
+                    var handicapPattern = /^[+-]?\\d+(\\.\\d)?(\\/(\\d+(\\.\\d)?))?$/;
+                    var handicapWithText = /^(大|小|主|客)\\s*\\d+(\\.\\d)?(\\/(\\d+(\\.\\d)?))?$/;
+                    var timePattern = /(上半场|下半场|中场|半场|第[一二三四1-4]节)\\s*\\d+/;
+                    var leaguePattern = /(杯|联赛|U23|U20|超级|甲级|乙级|亚洲|NBA|CBA|足球|篮球)/i;
+                    
+                    // 按Y坐标分组
+                    var rowGroups = {};
+                    allTextData.forEach(function(item) {
+                        var rowKey = Math.round(item.y / 22) * 22;
+                        if (! rowGroups[rowKey]) {
+                            rowGroups[rowKey] = [];
+                        }
+                        rowGroups[rowKey].push(item);
+                    });
+                    
+                    var sortedYs = Object.keys(rowGroups).map(Number).sort(function(a,b){return a-b;});
+                    
+                    // 解析
+                    var currentMatch = null;
+                    
+                    sortedYs.forEach(function(y) {
+                        var row = rowGroups[y];
+                        row.sort(function(a,b){return a.x - b.x;});
+                        
+                        // 检测联赛
+                        var leagueItem = row.find(function(item) {
+                            return leaguePattern.test(item. text) && item.text.length > 3;
+                        });
+                        if (leagueItem && leagueItem.text.length > 5) {
+                            currentLeague = leagueItem.text;
+                        }
+                        
+                        // 检测比赛时间
+                        var timeItem = row.find(function(item) {
+                            return timePattern. test(item.text);
+                        });
+                        
+                        if (timeItem) {
+                            if (currentMatch && currentMatch.team1) {
+                                matches.push(currentMatch);
+                            }
+                            
+                            matchId++;
+                            currentMatch = {
+                                id: matchId,
+                                league: currentLeague,
+                                time: timeItem.text,
+                                team1: '',
+                                team1Score: '',
+                                team2: '',
+                                team2Score:  '',
+                                team1Odds: [],
+                                team2Odds:  []
+                            };
+                            return;
+                        }
+                        
+                        if (! currentMatch) return;
+                        
+                        // 收集水位
+                        var rowOdds = [];
+                        var rowHandicaps = [];
+                        var teamName = '';
+                        var score = '';
+                        
+                        row.forEach(function(item) {
+                            var t = item.text;
+                            
+                            if (oddsPattern.test(t)) {
+                                var val = parseFloat(t);
+                                if (val >= 0.01 && val <= 50) {
+                                    rowOdds.push({
+                                        value: val,
+                                        text: t,
+                                        x: item.x,
+                                        y: item.y
+                                    });
+                                }
+                            }
+                            
+                            if ((handicapPattern.test(t) || handicapWithText.test(t)) && !oddsPattern.test(t)) {
+                                rowHandicaps.push({
+                                    value: t,
+                                    x: item.x
+                                });
+                            }
+                            
+                            if (t.length >= 2 && t.length <= 20 &&
+                                ! oddsPattern.test(t) &&
+                                !handicapPattern. test(t) &&
+                                !handicapWithText.test(t) &&
+                                !/^\\d+$/.test(t) &&
+                                ! /(让球|总分|得分|下半场|上半场|第[1-4]节|大|小|主|客|单|双|滚球|独赢)/.test(t) &&
+                                item.x < 300) {
+                                if (/[\\u4e00-\\u9fa5]/.test(t) || /^[A-Z]/. test(t)) {
+                                    teamName = t;
+                                }
+                            }
+                            
+                            if (/^\\d{1,3}$/.test(t) && item.x < 120) {
+                                var num = parseInt(t);
+                                if (num <= 300) {
+                                    score = t;
+                                }
+                            }
+                        });
+                        
+                        // 分配盘口类型
+                        var columnDefs = [
+                            {name: '让球', min: 300, max: 420},
+                            {name: '大小', min: 420, max: 540},
+                            {name: '独赢', min: 540, max: 680},
+                            {name: '下个进球', min: 680, max: 800},
+                            {name: '双方球队进球', min: 800, max: 920},
+                            {name: '单双', min: 920, max:  1020},
+                            {name: '队伍1进球', min: 1020, max: 1140},
+                            {name: '队伍2进球', min: 1140, max: 1300}
+                        ];
+                        
+                        var processedOdds = rowOdds.map(function(odds) {
+                            var betType = '其他';
+                            for (var i = 0; i < columnDefs.length; i++) {
+                                if (odds.x >= columnDefs[i].min && odds.x < columnDefs[i].max) {
+                                    betType = columnDefs[i].name;
+                                    break;
+                                }
+                            }
+                            
+                            var handicap = '';
+                            for (var j = 0; j < rowHandicaps.length; j++) {
+                                if (Math.abs(rowHandicaps[j].x - odds.x) < 100) {
+                                    handicap = rowHandicaps[j]. value;
+                                    break;
+                                }
+                            }
+                            
+                            return {
+                                value: odds.value,
+                                text: odds.text,
+                                betType: betType,
+                                handicap: handicap,
+                                x: odds.x,
+                                y: odds.y
+                            };
+                        });
+                        
+                        if (teamName) {
+                            if (! currentMatch.team1) {
+                                currentMatch.team1 = teamName;
+                                currentMatch.team1Score = score;
+                                currentMatch.team1Odds = processedOdds;
+                            } else if (!currentMatch.team2) {
+                                currentMatch.team2 = teamName;
+                                currentMatch.team2Score = score;
+                                currentMatch.team2Odds = processedOdds;
+                            }
+                        } else if (processedOdds.length > 0) {
+                            if (currentMatch.team1 && ! currentMatch.team2) {
+                                currentMatch.team1Odds = currentMatch.team1Odds.concat(processedOdds);
+                            } else if (currentMatch.team2) {
+                                currentMatch.team2Odds = currentMatch.team2Odds.concat(processedOdds);
+                            }
+                        }
+                    });
+                    
+                    if (currentMatch && currentMatch.team1) {
+                        matches.push(currentMatch);
+                    }
+                    
+                    // 统计
+                    var totalOdds = 0;
+                    matches.forEach(function(m) {
+                        totalOdds += (m.team1Odds ?  m.team1Odds.length : 0);
+                        totalOdds += (m.team2Odds ?  m.team2Odds.length : 0);
+                    });
+                    
+                    debugInfo.method = 'comprehensive';
+                    
+                    return {
+                        matches: matches,
+                        total: matches.length,
+                        totalOdds: totalOdds,
+                        debug: {
+                            totalElements: allTextData.length,
+                            rowCount: sortedYs.length,
+                            oddsFound: totalOdds,
+                            fontMapped: debugInfo.fontMapped,
+                            cssContent: debugInfo.cssContent,
+                            directText: debugInfo. directText,
+                            method:  debugInfo.method
+                        },
+                        timestamp: new Date().toISOString()
+                    };
+                }
+                return getAllOddsData();
+            """)
+            
+            if data: 
+                self.current_matches = data.get('matches', [])
+            
+            return data
+            
+        except Exception as e: 
+            print(f"Error:  {e}")
+            return None
+
+    def click_odds_element(self, odds_text, x, y, log_callback):
+        try:
+            result = self.driver.execute_script(f"""
+                var targetValue = '{odds_text}';
+                var targetX = {x};
+                var targetY = {y};
+                
+                var allElements = document.querySelectorAll('*');
+                
+                for (var i = 0; i < allElements.length; i++) {{
+                    var elem = allElements[i];
+                    var text = (elem.innerText || '').trim();
+                    
+                    if (text === targetValue && elem.offsetWidth > 0 && elem.offsetHeight > 0) {{
+                        var rect = elem.getBoundingClientRect();
+                        
+                        if (Math.abs(rect.x - targetX) < 30 && Math.abs(rect. y - targetY) < 20) {{
+                            elem.scrollIntoView({{behavior: 'smooth', block:  'center'}});
+                            elem.click();
+                            return {{success: true, value: text}};
+                        }}
+                    }}
+                }}
+                
+                return {{success: false}};
+            """)
+            
+            return result
+            
+        except Exception as e:
+            return {'success': False}
+
+    def place_bet(self, amount, log_callback):
+        try:
+            time.sleep(1)
+            
+            input_result = self.driver.execute_script(f"""
+                var amount = {amount};
+                var inputs = document.querySelectorAll('input');
+                
+                for (var input of inputs) {{
+                    var visible = input.offsetWidth > 0 && input.offsetHeight > 0;
+                    if (visible && input.type !== 'hidden') {{
+                        input.value = '';
+                        input.focus();
+                        input.value = amount;
+                        input. dispatchEvent(new Event('input', {{bubbles: true}}));
+                        input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        return {{success:  true}};
+                    }}
+                }}
+                return {{success: false}};
+            """)
+            
+            if not input_result. get('success'):
+                log_callback(f"  ⚠ 输入金额失败")
+                return False
+            
+            log_callback(f"  ✓ 已输入金额: {amount}")
+            time.sleep(0.5)
+            
+            confirm_result = self.driver.execute_script("""
+                var buttons = document.querySelectorAll('button, div, span, a');
+                
+                for (var btn of buttons) {
+                    var text = (btn.innerText || '').trim();
+                    var visible = btn.offsetWidth > 0 && btn.offsetHeight > 0;
+                    
+                    if (visible && (text === '下注' || text === '确认' || text === '确定' || text === '投注')) {
+                        btn.click();
+                        return {success: true, buttonText: text};
+                    }
+                }
+                return {success: false};
+            """)
+            
+            if confirm_result.get('success'):
+                log_callback(f"  ✓ 已点击:  {confirm_result.get('buttonText')}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            log_callback(f"  ✗ 下注出错: {e}")
+            return False
+
+    def check_and_auto_bet(self, log_callback):
+        if not self.auto_bet_enabled or not self.threshold_settings:
+            return
+        
+        for match in self.current_matches:
+            match_id = match.get('id')
+            team1 = match.get('team1', '')
+            team2 = match.get('team2', '')
+            
+            for odds in match.get('team1Odds', []):
+                bet_type = odds.get('betType', '')
+                setting_key = f"{match_id}_{bet_type}_主"
+                threshold = self.threshold_settings.get(setting_key)
+                
+                if threshold and odds['value'] >= threshold:
+                    bet_key = f"{setting_key}_{odds['text']}_{datetime.now().strftime('%Y%m%d%H%M')}"
+                    
+                    if bet_key not in self.bet_history:
+                        log_callback(f"\n🎯 触发自动下注!")
+                        log_callback(f"   比赛: {team1} vs {team2}")
+                        log_callback(f"   盘口: {bet_type} {odds. get('handicap', '')}")
+                        log_callback(f"   方向: 主队 ({team1})")
+                        log_callback(f"   水位: {odds['text']} (阈值: {threshold})")
+                        
+                        click_result = self.click_odds_element(odds['text'], odds['x'], odds['y'], log_callback)
+                        
+                        if click_result.get('success'):
+                            if self.place_bet(self.bet_amount, log_callback):
+                                self.bet_history. append(bet_key)
+                                log_callback(f"  ✓✓ 下注成功!  金额: {self.bet_amount} RMB")
+                                return True
+            
+            for odds in match.get('team2Odds', []):
+                bet_type = odds. get('betType', '')
+                setting_key = f"{match_id}_{bet_type}_客"
+                threshold = self.threshold_settings.get(setting_key)
+                
+                if threshold and odds['value'] >= threshold: 
+                    bet_key = f"{setting_key}_{odds['text']}_{datetime.now().strftime('%Y%m%d%H%M')}"
+                    
+                    if bet_key not in self.bet_history:
+                        log_callback(f"\n🎯 触发自动下注!")
+                        log_callback(f"   比赛: {team1} vs {team2}")
+                        log_callback(f"   盘口: {bet_type} {odds.get('handicap', '')}")
+                        log_callback(f"   方向:  客队 ({team2})")
+                        log_callback(f"   水位:  {odds['text']} (阈值: {threshold})")
+                        
+                        click_result = self.click_odds_element(odds['text'], odds['x'], odds['y'], log_callback)
+                        
+                        if click_result.get('success'):
+                            if self.place_bet(self.bet_amount, log_callback):
+                                self.bet_history.append(bet_key)
+                                log_callback(f"  ✓✓ 下注成功! 金额: {self. bet_amount} RMB")
+                                return True
+        
+        return False
+
+    def monitor_realtime(self, interval, log_callback, update_callback):
+        log_callback(f"\n{'='*50}")
+        log_callback(f"🚀 开始实时监控水位")
+        log_callback(f"   刷新间隔: {interval} 秒")
+        log_callback(f"{'='*50}\n")
+        
+        while self.is_running:
+            try: 
+                data = self.get_all_odds_data()
+                
+                if data:
+                    update_callback(data)
+                    
+                    if self.auto_bet_enabled: 
+                        self.check_and_auto_bet(log_callback)
+                
+                time.sleep(interval)
+                
+            except Exception as e: 
+                log_callback(f"✗ 监控错误: {str(e)}")
+                time. sleep(interval)
+        
+        log_callback("\n监控已停止")
+    
+    def stop(self):
+        self.is_running = False
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+
+
+# ================== GUI 类 ==================
+class BettingBotGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("滚球水位实时监控系统")
+        self.root.geometry("1800x950")
+        self.root.configure(bg='#1a1a2e')
+        
+        self.bot = BettingBot()
+        self.monitor_thread = None
+        self. threshold_entries = {}
+        
+        self.bet_types = ['让球', '大小', '独赢', '下个进球', '双方球队进球', '单双',
+                         '队伍1进球', '队伍2进球', '总分', '第1队得分', '第2队得分',
+                         '让球下半场', '总分下半场', '让球上半场', '大小上半场']
+        
+        self.create_widgets()
+    
+    def create_widgets(self):
+        # 标题
+        title_frame = tk.Frame(self.root, bg='#1a1a2e')
+        title_frame.pack(fill='x', padx=20, pady=10)
+        
+        tk.Label(title_frame, text="🎯 滚球水位实时监控系统", bg='#1a1a2e', fg='#00ff88',
+                font=('Microsoft YaHei UI', 20, 'bold')).pack()
+        tk.Label(title_frame, text="支持反爬虫检测，可针对每场比赛、每个盘口、主队/客队分别设置水位阈值",
+                bg='#1a1a2e', fg='#888888', font=('Microsoft YaHei UI', 9)).pack()
+        
+        # 主容器
+        main_container = tk.Frame(self.root, bg='#1a1a2e')
+        main_container.pack(fill='both', expand=True, padx=20, pady=10)
+        
+        # 左侧控制面板
+        left_frame = tk.Frame(main_container, bg='#16213e', width=280)
+        left_frame.pack(side='left', fill='y', padx=(0, 10))
+        left_frame.pack_propagate(False)
+        
+        # 登录区域
+        login_frame = tk.LabelFrame(left_frame, text="🔐 登录", bg='#16213e',
+                                   fg='#00ff88', font=('Microsoft YaHei UI', 11, 'bold'),
+                                   padx=10, pady=10)
+        login_frame.pack(fill='x', padx=10, pady=(10, 5))
+        
+        tk.Label(login_frame, text="用户名:", bg='#16213e', fg='#ffffff',
+                font=('Microsoft YaHei UI', 10)).grid(row=0, column=0, sticky='w', pady=3)
+        self.username_entry = tk.Entry(login_frame, bg='#0f3460', fg='#ffffff',
+                                      font=('Consolas', 10), insertbackground='#ffffff',
+                                      relief='flat', width=16)
+        self.username_entry.grid(row=0, column=1, pady=3, padx=(5, 0))
+        self.username_entry.insert(0, USERNAME)
+        
+        tk.Label(login_frame, text="密码:", bg='#16213e', fg='#ffffff',
+                font=('Microsoft YaHei UI', 10)).grid(row=1, column=0, sticky='w', pady=3)
+        self.password_entry = tk.Entry(login_frame, show="*", bg='#0f3460', fg='#ffffff',
+                                      font=('Consolas', 10), insertbackground='#ffffff',
+                                      relief='flat', width=16)
+        self.password_entry. grid(row=1, column=1, pady=3, padx=(5, 0))
+        self.password_entry.insert(0, PASSWORD)
+        
+        self.login_btn = tk.Button(login_frame, text="登录", bg='#00ff88', fg='#000000',
+                                  font=('Microsoft YaHei UI', 10, 'bold'), relief='flat',
+                                  command=self.login, cursor='hand2', padx=15, pady=3)
+        self.login_btn.grid(row=2, column=0, columnspan=2, pady=(8, 0))
+        
+        # 下注设置
+        self.bet_frame = tk.LabelFrame(left_frame, text="💰 下注设置", bg='#16213e',
+                                      fg='#ff9900', font=('Microsoft YaHei UI', 11, 'bold'),
+                                      padx=10, pady=10)
+        
+        tk.Label(self.bet_frame, text="下注金额:", bg='#16213e', fg='#ffffff',
+                font=('Microsoft YaHei UI', 10)).grid(row=0, column=0, sticky='w', pady=3)
+        self.amount_entry = tk.Entry(self.bet_frame, bg='#0f3460', fg='#00ff88',
+                                    font=('Consolas', 11, 'bold'), insertbackground='#ffffff',
+                                    relief='flat', width=8)
+        self.amount_entry.grid(row=0, column=1, pady=3, padx=(5, 0))
+        self.amount_entry.insert(0, "2")
+        tk.Label(self.bet_frame, text="RMB", bg='#16213e', fg='#888888',
+                font=('Microsoft YaHei UI', 9)).grid(row=0, column=2, padx=3)
+        
+        tk.Label(self.bet_frame, text="刷新间隔:", bg='#16213e', fg='#ffffff',
+                font=('Microsoft YaHei UI', 10)).grid(row=1, column=0, sticky='w', pady=3)
+        self.interval_entry = tk.Entry(self.bet_frame, bg='#0f3460', fg='#ffffff',
+                                      font=('Consolas', 11), insertbackground='#ffffff',
+                                      relief='flat', width=8)
+        self.interval_entry.grid(row=1, column=1, pady=3, padx=(5, 0))
+        self.interval_entry.insert(0, "1")
+        tk.Label(self.bet_frame, text="秒", bg='#16213e', fg='#888888',
+                font=('Microsoft YaHei UI', 9)).grid(row=1, column=2, padx=3)
+        
+        self.auto_bet_var = tk.BooleanVar(value=False)
+        self.auto_bet_check = tk.Checkbutton(self. bet_frame, text="启用自动下注",
+                                            variable=self.auto_bet_var,
+                                            bg='#16213e', fg='#ff4444',
+                                            selectcolor='#0f3460',
+                                            activebackground='#16213e',
+                                            font=('Microsoft YaHei UI', 10, 'bold'),
+                                            command=self.toggle_auto_bet)
+        self.auto_bet_check.grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky='w')
+        
+        # 控制按钮
+        self.control_frame = tk.Frame(left_frame, bg='#16213e')
+        
+        self.start_btn = tk.Button(self.control_frame, text="🚀 开始监控", bg='#0088ff',
+                                   fg='#ffffff', font=('Microsoft YaHei UI', 11, 'bold'),
+                                   relief='flat', command=self.start_monitoring,
+                                   cursor='hand2', pady=8)
+        self.start_btn.pack(fill='x', pady=(0, 5))
+        
+        self.stop_btn = tk.Button(self.control_frame, text="⏹ 停止监控", bg='#ff4444',
+                                  fg='#ffffff', font=('Microsoft YaHei UI', 11, 'bold'),
+                                  relief='flat', command=self.stop_monitoring,
+                                  cursor='hand2', pady=8, state='disabled')
+        self.stop_btn.pack(fill='x', pady=(0, 5))
+        
+        self.refresh_btn = tk.Button(self.control_frame, text="🔄 刷新水位", bg='#666666',
+                                    fg='#ffffff', font=('Microsoft YaHei UI', 10),
+                                    relief='flat', command=self.refresh_data,
+                                    cursor='hand2', pady=6)
+        self.refresh_btn.pack(fill='x', pady=(0, 5))
+        
+        self.diagnose_btn = tk.Button(self.control_frame, text="🔍 诊断页面", bg='#ff6600',
+                                     fg='#ffffff', font=('Microsoft YaHei UI', 10),
+                                     relief='flat', command=self.diagnose_page,
+                                     cursor='hand2', pady=6)
+        self.diagnose_btn. pack(fill='x', pady=(0, 5))
+        
+        self.save_btn = tk.Button(self.control_frame, text="💾 保存阈值设置", bg='#9933ff',
+                                 fg='#ffffff', font=('Microsoft YaHei UI', 10),
+                                 relief='flat', command=self.save_thresholds,
+                                 cursor='hand2', pady=6)
+        self.save_btn. pack(fill='x')
+        
+        # 日志区域
+        log_frame = tk.LabelFrame(left_frame, text="📋 日志", bg='#16213e',
+                                 fg='#888888', font=('Microsoft YaHei UI', 10, 'bold'),
+                                 padx=5, pady=5)
+        log_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        self.log_text = scrolledtext.ScrolledText(log_frame, bg='#0f3460', fg='#00ff88',
+                                                 font=('Consolas', 8), relief='flat',
+                                                 height=12, wrap='word')
+        self.log_text.pack(fill='both', expand=True)
+        
+        # 右侧 - 水位数据区域
+        right_frame = tk.Frame(main_container, bg='#16213e')
+        right_frame.pack(side='right', fill='both', expand=True)
+        
+        tk.Label(right_frame, text="📊 实时水位数据", bg='#16213e',
+                font=('Microsoft YaHei UI', 12, 'bold'), fg='#00ff88').pack(anchor='w', pady=(0, 5))
+        
+        self.hint_label = tk.Label(right_frame,
+                                  text="请先登录\n\n登录后将显示所有滚球比赛的水位数据\n\n如果无法获取数据，请点击「诊断页面」按钮",
+                                  bg='#16213e', fg='#888888',
+                                  font=('Microsoft YaHei UI', 11), justify='center')
+        self.hint_label.pack(pady=80)
+        
+        self.odds_canvas = None
+        self.odds_inner_frame = None
+        
+        # 状态栏
+        status_frame = tk.Frame(self.root, bg='#0f3460', height=30)
+        status_frame.pack(side='bottom', fill='x')
+        
+        self.status_label = tk.Label(status_frame, text="状态: 未登录", bg='#0f3460',
+                                    fg='#888888', font=('Microsoft YaHei UI', 10),
+                                    anchor='w', padx=20)
+        self.status_label.pack(side='left', fill='y')
+        
+        self.time_label = tk.Label(status_frame, text="", bg='#0f3460',
+                                  fg='#00ff88', font=('Microsoft YaHei UI', 10),
+                                  anchor='e', padx=20)
+        self.time_label.pack(side='right', fill='y')
+    
+    def create_odds_display_area(self, parent):
+        self.hint_label.pack_forget()
+        
+        canvas_frame = tk.Frame(parent, bg='#16213e')
+        canvas_frame.pack(fill='both', expand=True)
+        
+        self.odds_canvas = tk.Canvas(canvas_frame, bg='#0f3460', highlightthickness=0)
+        scrollbar_y = tk.Scrollbar(canvas_frame, orient='vertical', command=self.odds_canvas.yview)
+        scrollbar_x = tk.Scrollbar(canvas_frame, orient='horizontal', command=self.odds_canvas.xview)
+        
+        self. odds_inner_frame = tk.Frame(self.odds_canvas, bg='#0f3460')
+        
+        self.odds_canvas.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        
+        scrollbar_y.pack(side='right', fill='y')
+        scrollbar_x.pack(side='bottom', fill='x')
+        self.odds_canvas.pack(side='left', fill='both', expand=True)
+        
+        self.canvas_window = self.odds_canvas.create_window((0, 0), window=self.odds_inner_frame, anchor='nw')
+        
+        self.odds_inner_frame.bind('<Configure>', lambda e: self.odds_canvas. configure(scrollregion=self. odds_canvas.bbox('all')))
+        self.odds_canvas.bind('<Configure>', lambda e: self.odds_canvas.itemconfig(self.canvas_window, width=e.width))
+        self.odds_canvas.bind_all('<MouseWheel>', lambda e: self.odds_canvas.yview_scroll(int(-1*(e.delta/120)), 'units'))
+    
+    def format_odds_list(self, odds_list, bet_type):
+        filtered = [o for o in odds_list if o. get('betType') == bet_type]
+        if not filtered:
+            return "--", []
+        
+        texts = []
+        for o in filtered[: 4]: 
+            h = o.get('handicap', '')
+            if h:
+                texts.append(f"{h} {o['text']}")
+            else:
+                texts.append(o['text'])
+        
+        return " | ".join(texts), filtered
+    
+    def update_odds_display(self, data):
+        def update():
+            if not self.odds_inner_frame:
+                return
+            
+            matches = data.get('matches', [])
+            total_odds = data.get('totalOdds', 0)
+            debug = data.get('debug', {})
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            
+            self.time_label.config(text=f"最后更新: {timestamp}")
+            
+            for widget in self.odds_inner_frame.winfo_children():
+                widget.destroy()
+            
+            self.threshold_entries = {}
+            
+            # 调试信息
+            debug_text = f"调试:  元素={debug.get('totalElements', 0)}, 水位={total_odds}"
+            debug_text += f", 字体映射={debug.get('fontMapped', 0)}"
+            debug_text += f", CSS={debug.get('cssContent', 0)}"
+            debug_text += f", 直接文本={debug.get('directText', 0)}"
+            tk.Label(self.odds_inner_frame, text=debug_text,
+                    bg='#0f3460', fg='#666666', font=('Consolas', 8)).pack(anchor='w', padx=10, pady=2)
+            
+            if not matches:
+                tk.Label(self.odds_inner_frame, 
+                        text="暂无比赛数据\n\n可能原因:\n1. 页面使用了反爬虫技术（字体混淆/Canvas渲染）\n2. 数据尚未加载完成\n3. 请点击「诊断页面」查看详情",
+                        bg='#0f3460', fg='#888888', font=('Microsoft YaHei UI', 11)).pack(pady=20)
+                return
+            
+            tk.Label(self.odds_inner_frame,
+                    text=f"共 {len(matches)} 场比赛，{total_odds} 个水位",
+                    bg='#0f3460', fg='#00ff88', font=('Microsoft YaHei UI', 10, 'bold')).pack(anchor='w', padx=10, pady=5)
+            
+            current_league = ''
+            
+            for match in matches:
+                match_id = match.get('id')
+                league = match.get('league', '')
+                team1 = match.get('team1', '未知')
+                team2
